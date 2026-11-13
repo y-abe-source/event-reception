@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f5f9; font-family: -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; color: #222; }
+    header { background: #283593; color: #fff; padding: 12px 16px; }
+    header h1 { margin: 0; font-size: 17px; }
+    .stats { display: flex; gap: 16px; margin-top: 6px; font-size: 14px; }
+    .stats b { font-size: 18px; }
+    main { max-width: 560px; margin: 0 auto; padding: 12px 16px 48px; }
+    #reader { width: 100%; background: #000; border-radius: 12px; overflow: hidden; min-height: 40px; }
+    .buttons { display: flex; gap: 8px; margin-top: 8px; }
+    button { font: inherit; border: 0; border-radius: 8px; padding: 12px 14px; cursor: pointer; }
+    .primary { background: #3949ab; color: #fff; flex: 1; }
+    .secondary { background: #e3e6f3; color: #283593; flex: 1; }
+    .small { padding: 8px 12px; font-size: 14px; }
+    .danger { background: #fdecea; color: #c62828; }
+
+    #result { margin-top: 12px; border-radius: 12px; padding: 16px; display: none; }
+    #result.ok { display: block; background: #e8f5e9; border: 3px solid #43a047; }
+    #result.already { display: block; background: #fff8e1; border: 3px solid #f9a825; }
+    #result.error { display: block; background: #fdecea; border: 3px solid #e53935; }
+    #result.wait { display: block; background: #eceff1; border: 3px solid #b0bec5; }
+    .r-title { font-size: 20px; font-weight: bold; }
+    .r-name { font-size: 26px; font-weight: bold; margin-top: 8px; }
+    .r-org { font-size: 15px; color: #444; }
+    .r-sub { font-size: 14px; color: #555; margin-top: 4px; }
+    .bento { display: inline-block; margin-top: 10px; padding: 8px 16px; border-radius: 8px; font-size: 20px; font-weight: bold; }
+    .bento.yes { background: #ff7043; color: #fff; }
+    .bento.no { background: #e0e0e0; color: #555; }
+
+    section { margin-top: 24px; }
+    h2 { font-size: 15px; margin: 0 0 8px; color: #444; }
+    .search { display: flex; gap: 8px; }
+    .search input { flex: 1; font: inherit; padding: 10px; border: 1px solid #ccc; border-radius: 8px; min-width: 0; }
+    ul { list-style: none; padding: 0; margin: 8px 0 0; }
+    li { background: #fff; border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+    li .info { flex: 1; min-width: 0; }
+    li .info div:first-child { font-weight: bold; }
+    li .info div:last-child { font-size: 13px; color: #666; }
+    .tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #e8f5e9; color: #2e7d32; white-space: nowrap; }
+    #file-reader { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="title">受付</h1>
+    <div class="stats">
+      <div>来場 <b id="s-in">-</b> / <span id="s-total">-</span></div>
+      <div>お弁当 <b id="s-bento-in">-</b> / <span id="s-bento-total">-</span></div>
+    </div>
+  </header>
+
+  <main>
+    <div id="reader"></div>
+    <div class="buttons">
+      <button class="primary" id="btn-cam">カメラ起動</button>
+      <button class="secondary" id="btn-photo">写真で読み取る</button>
+      <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+    </div>
+    <div id="file-reader"></div>
+
+    <div id="result"></div>
+
+    <section>
+      <h2>名前・会社名で検索（QRがない方）</h2>
+      <form class="search" id="search-form">
+        <input id="q" type="search" placeholder="例：山田 / 〇〇株式会社">
+        <button class="primary small" style="flex:none">検索</button>
+      </form>
+      <ul id="search-results"></ul>
+    </section>
+
+    <section>
+      <h2>この端末の受付履歴</h2>
+      <ul id="history"></ul>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script>
+    // このファイルは Apps Script 内でも、外部（GitHub Pages など）に置いても動く。
+    // 外部に置いた場合は URL の # 以降で api（ウェブアプリURL）と key を受け取る。
+    const IN_GAS = typeof google !== 'undefined' && google.script && google.script.run;
+    let API = '';
+    let KEY = '';
+    let scanner = null;
+    let busy = false;
+    let lastCode = '';
+    let lastAt = 0;
+
+    const $ = id => document.getElementById(id);
+
+    function el(tag, className, text) {
+      const e = document.createElement(tag);
+      if (className) e.className = className;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+
+    function run(fn, arg) {
+      if (IN_GAS) {
+        return new Promise((resolve, reject) => {
+          google.script.run.withSuccessHandler(resolve).withFailureHandler(reject)[fn](KEY, arg);
+        });
+      }
+      // text/plain で送るとCORSのプリフライトが発生せず、Apps Script に直接POSTできる
+      return fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify({ action: fn, key: KEY, id: arg, query: arg }),
+      })
+        .then(r => r.json())
+        .then(r => {
+          if (!r.ok) throw new Error(r.error);
+          return r.data;
+        });
+    }
+
+    function loadParams() {
+      if (IN_GAS) {
+        return new Promise(resolve => google.script.url.getLocation(loc => resolve(loc.parameter)));
+      }
+      return Promise.resolve(Object.fromEntries(new URLSearchParams(location.hash.slice(1))));
+    }
+
+    // ---- カメラ ----
+    $('btn-cam').onclick = () => {
+      if (scanner && scanner.isScanning) {
+        scanner.stop().then(() => { $('btn-cam').textContent = 'カメラ起動'; });
+        return;
+      }
+      scanner = scanner || new Html5Qrcode('reader');
+      scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 220, height: 220 } }, onScan)
+        .then(() => { $('btn-cam').textContent = 'カメラ停止'; })
+        .catch(err => showMessage('error', 'カメラを起動できませんでした',
+          '「写真で読み取る」か、名前検索をご利用ください。（' + err + '）'));
+    };
+
+    function onScan(text) {
+      const now = Date.now();
+      if (busy || (text === lastCode && now - lastAt < 4000)) return;
+      lastCode = text;
+      lastAt = now;
+      doCheckIn(text);
+    }
+
+    // ---- 写真で読み取る（カメラが使えない端末用）----
+    $('btn-photo').onclick = () => $('photo').click();
+    $('photo').onchange = e => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      new Html5Qrcode('file-reader').scanFile(file, false)
+        .then(doCheckIn)
+        .catch(() => showMessage('error', 'QRコードを読み取れませんでした', 'QRコードが大きく写るように撮り直してください。'));
+    };
+
+    // ---- 受付 ----
+    function doCheckIn(id) {
+      busy = true;
+      showMessage('wait', '確認中…', '');
+      run('checkIn', id)
+        .then(r => { renderResult(r); refreshStats(); })
+        .catch(err => showMessage('error', 'エラーが発生しました', err.message))
+        .finally(() => { busy = false; });
+    }
+
+    function renderResult(r) {
+      if (r.result === 'not_found') {
+        showMessage('error', '該当者が見つかりません', '読み取ったコード：' + r.id);
+        vibrate([100, 60, 100, 60, 100]);
+        return;
+      }
+      const a = r.attendee;
+      const box = $('result');
+      box.className = r.result === 'ok' ? 'ok' : 'already';
+      box.replaceChildren(
+        el('div', 'r-title', r.result === 'ok' ? '✓ 受付完了' : '⚠ すでに受付済みです'),
+        el('div', 'r-name', a.name + ' 様'),
+        el('div', 'r-org', a.company + '　' + a.dept),
+        el('div', 'r-sub', '受付時刻：' + a.checkedInAt),
+        el('div', 'bento ' + (a.bento ? 'yes' : 'no'), a.bento ? '🍱 お弁当あり' : 'お弁当なし')
+      );
+      if (r.result === 'ok') {
+        const undo = el('button', 'danger small', '取り消す');
+        undo.style.marginLeft = '8px';
+        undo.onclick = () => doUndo(a);
+        box.appendChild(undo);
+        addHistory(a);
+        vibrate(150);
+      } else {
+        vibrate([100, 60, 100]);
+      }
+    }
+
+    function doUndo(a) {
+      if (!confirm(a.name + ' 様の受付を取り消しますか？')) return;
+      run('undoCheckIn', a.id)
+        .then(() => { showMessage('wait', '受付を取り消しました', a.name + ' 様'); refreshStats(); })
+        .catch(err => showMessage('error', 'エラーが発生しました', err.message));
+    }
+
+    function showMessage(type, title, sub) {
+      const box = $('result');
+      box.className = type;
+      box.replaceChildren(el('div', 'r-title', title), el('div', 'r-sub', sub));
+    }
+
+    function vibrate(p) {
+      if (navigator.vibrate) navigator.vibrate(p);
+    }
+
+    function addHistory(a) {
+      const li = el('li');
+      const info = el('div', 'info');
+      info.append(el('div', null, a.name + ' 様'), el('div', null, a.company + '　' + a.checkedInAt));
+      li.append(info, el('span', 'tag', a.bento ? '弁当あり' : '弁当なし'));
+      $('history').prepend(li);
+      while ($('history').children.length > 20) $('history').lastChild.remove();
+    }
+
+    // ---- 検索 ----
+    $('search-form').onsubmit = e => {
+      e.preventDefault();
+      const q = $('q').value.trim();
+      if (!q) return;
+      run('searchAttendees', q).then(renderSearch)
+        .catch(err => showMessage('error', 'エラーが発生しました', err.message));
+    };
+
+    function renderSearch(list) {
+      const ul = $('search-results');
+      ul.replaceChildren();
+      if (list.length === 0) {
+        ul.appendChild(el('li', null, '該当者がいません'));
+        return;
+      }
+      list.forEach(a => {
+        const li = el('li');
+        const info = el('div', 'info');
+        info.append(el('div', null, a.name + ' 様'), el('div', null, a.company + '　' + a.dept));
+        li.appendChild(info);
+        if (a.checkedIn) {
+          li.appendChild(el('span', 'tag', '受付済'));
+          const undo = el('button', 'danger small', '取消');
+          undo.onclick = () => doUndo(a);
+          li.appendChild(undo);
+        } else {
+          const btn = el('button', 'primary small', '受付');
+          btn.style.flex = 'none';
+          btn.onclick = () => { doCheckIn(a.id); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+          li.appendChild(btn);
+        }
+        ul.appendChild(li);
+      });
+    }
+
+    // ---- 集計 ----
+    function refreshStats() {
+      return run('getStats').then(s => {
+        $('title').textContent = s.eventName + ' 受付';
+        document.title = s.eventName + ' 受付';
+        $('s-in').textContent = s.checkedIn;
+        $('s-total').textContent = s.total;
+        $('s-bento-in').textContent = s.bentoCheckedIn;
+        $('s-bento-total').textContent = s.bentoTotal;
+      });
+    }
+
+    loadParams().then(p => {
+      KEY = p.key || '';
+      API = p.api || '';
+      if (!KEY || (!IN_GAS && !API)) {
+        showMessage('error', '受付用URLから開いてください',
+          'スプレッドシートの「受付アプリ → 受付用URLを表示」に表示されるURLを開いてください。');
+        return;
+      }
+      refreshStats().catch(err => showMessage('error', '接続できませんでした', err.message));
+      setInterval(() => refreshStats().catch(() => {}), 30000);
+    });
+  </script>
+</body>
+</html>
